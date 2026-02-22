@@ -9,9 +9,9 @@ import torch
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-OUTPUT_DIR = ROOT / "data/processed"
 PARQUET_DIR = ROOT / "data/parquet"
-MODEL_RUNS_BASE_DIR = ROOT / "artifacts/model_runs"
+PROCESSED_DIR = ROOT / "data/processed"
+MODEL_RUNS_BASE_DIR = ROOT / "artifacts/runs"
 MODELS_DIR = ROOT / "artifacts/models"
 
 
@@ -72,7 +72,7 @@ def save_dataset(
 ):
     """
     Save sequences in (model-ready format)
-      OUTPUT_DIR/
+      PROCESSED_DIR/
         sequences.jsonl    - one JSON object p/patient (primary format)
         sequences.pkl      - pickle backup (preserves datetime objects)
         metadata.json      - cohort stats, schema, label distribution
@@ -175,9 +175,9 @@ def load_sequences_jsonl(path: str) -> list[dict]:
     return sequences
 
 
-def resolve_path(p: str | None, dflt: Path) -> Path:
+def resolve_path(p: str, dflt: Path) -> Path:
     """Resolve path string to relative or absolute Path, fallback to default"""
-    path = Path(p) if p is not None else dflt
+    path = Path(ROOT / p) if p != "" else dflt
     if not path.exists():
         path = ROOT / path
         if not path.exists():
