@@ -1,0 +1,20 @@
+[project]
+name = "chronos-lens"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "tqdm",
+    "pyyaml",
+    "matplotlib",
+    "google-auth",
+    "google-cloud-bigquery",
+    "db-dtypes",
+    "pyarrow",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
