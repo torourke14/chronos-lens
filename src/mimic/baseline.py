@@ -1,103 +1,9 @@
-from typing import Tuple
-import json
-import tempfile
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-
-from src.config.io import load_sequences_jsonl, save_dataset
-
-
-def validate_sequences(sequences: list[dict]):
-    """Run all structural checks on built sequences."""
-    print("\nSEQUENCE VALIDATION")
-    print("=" * 60)
-
-    assert len(sequences) > 0, "FAIL: no sequences produced"
-    print(f"  Pipeline produced {len(sequences)} patient sequences")
-
-    # Min encounters
-    min_enc = min(len(s["encounters"]) for s in sequences)
-    assert min_enc >= 3, f"FAIL: found sequence with {min_enc} encounters"
-    print(f"  All sequences have >= 3 encounters (min={min_enc})")
-
-    # F32/F33 in every patient
-    for seq in sequences:
-        has_dep = any(
-            code.upper().replace(".", "").startswith(("F32", "F33"))
-            for enc in seq["encounters"]
-            for code in enc["icd_codes"]
-        )
-        assert has_dep, f"FAIL: patient {seq['subject_id']} has no F32/F33"
-    print("  All patients have at least one F32/F33 diagnosis")
-
-    # Time ordering
-    for seq in sequences:
-        times = [enc["admittime"] for enc in seq["encounters"]]
-        assert times == sorted(times), f"FAIL: patient {seq['subject_id']} not sorted"
-    print("  ✓ All encounter sequences are time-ordered")
-
-    # Binary labels
-    labels = set(s["label"] for s in sequences)
-    assert labels.issubset({0, 1}), f"FAIL: unexpected labels {labels}"
-    print("  ✓ Labels are binary (0/1)")
-
-    n_pos = sum(1 for s in sequences if s["label"] == 1)
-    n_neg = len(sequences) - n_pos
-    print(f"  ✓ Label distribution: {n_pos} positive, {n_neg} negative")
-
-    # Schema
-    for seq in sequences:
-        assert isinstance(seq["subject_id"], str)
-        assert isinstance(seq["label"], int)
-        assert isinstance(seq["encounters"], list)
-        for enc in seq["encounters"]:
-            assert isinstance(enc["hadm_id"], int)
-            assert isinstance(enc["icd_codes"], list)
-            assert isinstance(enc["meds"], list)
-            assert hasattr(enc["admittime"], "strftime")
-    print("  ✓ Schema matches target specification")
-
-    # Meds normalized
-    for seq in sequences[:50]:
-        for enc in seq["encounters"]:
-            for med in enc["meds"]:
-                assert med == med.lower().strip(), f"FAIL: med '{med}' not normalized"
-    print("  ✓ Medication names are lowercase and stripped")
-
-
-def validate_save_load(sequences: list[dict], min_encounters: int, 
-                       readm_window_days: int, depression_prefixes: Tuple
-):
-    """Verify save_dataset output and JSONL round-trip."""
-    print("\nSAVE / LOAD VALIDATION")
-    print("=" * 60)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        save_dataset(sequences, Path(tmpdir), min_encounters, readm_window_days, depression_prefixes)
-
-        assert (Path(tmpdir) / "sequences.jsonl").exists()
-        assert (Path(tmpdir) / "sequences.pkl").exists()
-        assert (Path(tmpdir) / "metadata.json").exists()
-        print("  All output files present")
-
-        with open(Path(tmpdir) / "metadata.json") as f:
-            meta = json.load(f)
-        assert meta["n_patients"] == len(sequences)
-        assert meta["vocab_size_icd"] > 0
-        assert meta["vocab_size_meds"] > 0
-        print(f"  Metadata valid (vocab: {meta['vocab_size_icd']} ICD, {meta['vocab_size_meds']} meds)")
-
-        loaded = load_sequences_jsonl(str(Path(tmpdir) / "sequences.jsonl"))
-        assert len(loaded) == len(sequences)
-        assert loaded[0]["subject_id"] == sequences[0]["subject_id"]
-        assert isinstance(loaded[0]["encounters"][0]["admittime"], pd.Timestamp)
-        print("  JSONL round-trip preserves data and datetimes")
 
 
 def flatten_sequences(sequences: list[dict]) -> tuple[pd.DataFrame, pd.Series]:
@@ -177,8 +83,8 @@ def flatten_sequences(sequences: list[dict]) -> tuple[pd.DataFrame, pd.Series]:
 
 
 def run_baseline(sequences: list[dict]) -> dict:
-    """ Logistic regression baseline on flattened features.
-    """
+    """ Logistic regression baseline on flattened features. """
+    
     print("\n" + "=" * 60)
     print("Logistic Regression baseline")
     print("=" * 60)

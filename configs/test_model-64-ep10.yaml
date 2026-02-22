@@ -1,0 +1,20 @@
+data:
+    batch_size: 8
+    n_patients: 50                  # Max patients to load
+    pad_idx: 0                      # token index reserved for padding
+    data_dir: "data/processed"      # not required to change, if needed
+artifacts:
+    output_dir: "artifacts/runs"    # not required to change, if needed
+    tag: "model-64-ep10"            # unique tag (artifacts folder created under artifacts/runs)
+    run_emb_extraction_post: True   # whether to run embedding extraction after training
+model:
+    embed_dim: 64
+    num_heads: 2
+    num_layers: 2
+    ffn_dim: 256                    # 4 × EMBED_DIM
+    max_seq_len: 128                # positional embedding capacity
+    predictor_hidden_dim: 128
+optimization:
+    epochs: 10
+    lr: .001
+    tau: 0.996                      # EMA momentum
