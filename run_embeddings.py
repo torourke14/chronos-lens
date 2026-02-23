@@ -24,19 +24,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from src.config.io import load_checkpoint, resolve_path
+from src.config.io import (
+    load_sequences, 
+    PROCESSED_DIR,
+    MODEL_RUNS_BASE_DIR)
 from src.training.dataset import JEPADataset, collate_fn
 from src.models.sequential_jepa import JEPA
-from src.train import (
-    EMBED_DIM,
-    NUM_HEADS,
-    NUM_LAYERS,
-    FFN_DIM,
-    MAX_SEQ_LEN,
-    PREDICTOR_HIDDEN,
-    TAU,
-    BATCH_SIZE,
-)
 
 
 # =============================================================================
@@ -154,11 +147,11 @@ def run_sanity_checks(
 
 
 
-def main(
+def extract(
     model: JEPA,
     loader: DataLoader,
     device: torch.device,
-    artifacts_dir: Path
+    out_fn: Path,
 ):    
     model.eval()
 
@@ -166,19 +159,15 @@ def main(
     z_context, z_pred, z_target, delta, subject_ids, mask_positions, labels = \
         extract_embeddings(model, loader, device)
 
-    # -- Sanity checks (before save) ---------------------------------------
+    # don't save if embeddings not statistically sane (e.g. predictor collapsed)
     all_passed = run_sanity_checks(z_context, z_pred, z_target, delta)
 
     if not all_passed:
         print("Embeddings NOT saved: one or more sanity checks failed.")
         return
 
-    # -- Save --------------------------------------------------------------
-    out_path = artifacts_dir / "embeddings.npz"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
     np.savez(
-        out_path,
+        out_fn,
         z_context      = z_context,
         z_pred         = z_pred,
         z_target       = z_target,
@@ -187,7 +176,7 @@ def main(
         mask_positions = mask_positions,
         labels         = labels,
     )
-    print(f"Embeddings saved to {out_path}")
+    print(f"Embeddings saved to {out_fn}")
     print(f"  z_context      : {z_context.shape}")
     print(f"  z_pred         : {z_pred.shape}")
     print(f"  z_target       : {z_target.shape}")
@@ -195,59 +184,86 @@ def main(
     print(f"  subject_ids    : {subject_ids.shape}")
     print(f"  mask_positions : {mask_positions.shape}")
     print(f"  labels         : {labels.shape}")
-    
 
+
+def extract_from_checkpoint(
+    model_tag:     str,
+    ckpt_name:     str,
+    n_patients:    int | None = None,
+    batch_size:    int = 64,
+):
+    artifact_dir = MODEL_RUNS_BASE_DIR / model_tag
+    assert artifact_dir.exists(), f"[extract_from_checkpoint] Model run folder not found: {artifact_dir}"
+    
+    ckpt_fn = f"{ckpt_name.replace('.pt', '')}.pt"
+    checkpoint_path = artifact_dir / ckpt_fn
+    assert checkpoint_path.exists(), f"[extract_from_checkpoint] Checkpoint file not found: {checkpoint_path}"
+    
+    vocab_path = artifact_dir / "vocab.json"
+    assert vocab_path.exists(), f"[extract_from_checkpoint] Vocab file not found: {vocab_path}"
+    
+    sequences_path = PROCESSED_DIR / "sequences.jsonl"
+    assert sequences_path.exists(), f"[extract_from_checkpoint] Sequences file not found: {sequences_path}"
+    
+    # -- Reconstruct model from checkpoint
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # --- load model
+    model_p = checkpoint["model_params"]
+    model = JEPA(**model_p).to(device)
+    model.load_state_dict(checkpoint["model_sd"])
+    print(f"[extract_from_checkpoint] Model loaded from checkpoint successfully.")
+    
+    # --- Build vocab/dataset/dataloader -----------------------------------------------------
+    with open(vocab_path, encoding="utf-8") as fh:
+        vocab = json.load(fh)
+    assert vocab is not None and len(vocab) > 0, "Vocab loading failed."
+    print(f"[extract_from_checkpoint]vocab loaded vocab")
+    
+    # --- load patients
+    patients = load_sequences(sequences_path)
+    if n_patients is not None:
+        patients = patients[: n_patients]
+    print(f"[extract_from_checkpoint] Loaded {len(patients)} patient sequences")
+    
+    # ---
+    dataset = JEPADataset(patients, vocab)
+    assert len(dataset) > 0, "No samples produced. Check that patients have >=2 encounters."
+    print(f"[extract_from_checkpoint] Loaded dataset with {len(dataset)} samples")
+
+    loader = DataLoader(dataset, batch_size=batch_size,
+                        shuffle=False, collate_fn=collate_fn)
+    
+    ep_str = f"_ep{checkpoint['epoch']}" if "epoch" in checkpoint else ""
+    extract(model, loader=loader, device=device, 
+            out_fn=artifact_dir / f"embeddings_{model_tag}{ep_str}.npz")
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Extract JEPA embeddings from a frozen checkpoint")
     
-    parser.add_argument(
-        "--model_tag",  type=str, required=True,
-        help="model tag (name of run folder in artifacts/runs/)")
-    parser.add_argument(
-        "--data_dir",   default="data/processed/sequences.jsonl",
-        help="Path to sequences.jsonl")
-    parser.add_argument(
-        "--n-patients", type=int, default=None, 
-        help="Max patients to process (default: all)")
+    parser.add_argument("--model_tag",  type=str, required=True,
+                        help="model tag (name of run folder in artifacts/runs/)")
+    parser.add_argument("--checkpoint_name",  type=str, required=True,
+                        help="checkpoint filename (e.g. model_checkpoint.pt)")
+    parser.add_argument("--batch_size", type=int, default=64, 
+                        help="Batch size for embedding passover (default: 64)")
+    parser.add_argument("--n-patients", type=int, default=None, 
+                        help="Max patients to process (default: all)")
     args = parser.parse_args()
 
-    # --- parse paths
-    data_dir = resolve_path(args.data_dir)
-    ckpt_path = resolve_path(f"artifacts/runs/{args.model_tag}/model_checkpoint.pt")
-    vocab_path = resolve_path(f"artifacts/runs/{args.model_tag}/vocab.json")
-    artifacts_dir = resolve_path(f"artifacts/runs/{args.model_tag}")
+    extract_from_checkpoint(
+        model_tag=args.model_tag,
+        ckpt_name=args.checkpoint_name,
+        n_patients=args.n_patients,
+        batch_size=args.batch_size,
+    )
     
-    # --- Build dataset/dataloader -----------------------------------------------------
-    # --- load vocab
-    with open(vocab_path, encoding="utf-8") as fh:
-        vocab = json.load(fh)
-    assert vocab is not None, "Vocab loading failed."
-    print(f"Loaded vocab from:      {vocab_path}")
     
-    # --- load patients
-    patients: list[dict] = []
-    with open(data_dir, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                patients.append(json.loads(line))
-    if args.n_patients is not None:
-        patients = patients[: args.n_patients]
-    print(f"Loaded patients from:   {data_dir}")
     
-    # ---
-    dataset = JEPADataset(patients, vocab)
-    print(f"Loaded dataset with {len(dataset)} samples")
-    assert len(dataset) > 0, "No samples produced. Check that patients have >=2 encounters."
-
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE,
-                        shuffle=False, collate_fn=collate_fn)
     
-    # -- Reconstruct model from checkpoint
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, _, _ = load_checkpoint(str(ckpt_path.absolute()), device)
     
-    main(model, loader=loader, device=device, artifacts_dir=artifacts_dir)
+    
     

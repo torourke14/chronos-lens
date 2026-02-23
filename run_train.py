@@ -11,11 +11,8 @@ from src.train import main as app_main
 parser = argparse.ArgumentParser(
     description="Minimal JEPA training pipeline for patient sequences")
 parser.add_argument(
-    "--cfg", type=str, 
+    "--cfg",        type=str, 
     required=True, help="Name of configs/* file to load")
-parser.add_argument(
-    "--data_dir", type=str,
-    default="", help="Path to sequences.jsonl folder")
 
 
 def main():

@@ -7,7 +7,7 @@ import pickle
 import numpy as np
 import pandas as pd
 
-from src.config.io import load_sequences_jsonl
+from src.config.io import load_sequences
 
 
 def save_dataset(
@@ -180,7 +180,7 @@ def validate_save_load(sequences: list[dict], min_encounters: int,
         assert meta["vocab_size_meds"] > 0
         print(f"  Metadata valid (vocab: {meta['vocab_size_icd']} ICD, {meta['vocab_size_meds']} meds)")
 
-        loaded = load_sequences_jsonl(str(Path(tmpdir) / "sequences.jsonl"))
+        loaded = load_sequences(Path(tmpdir) / "sequences.jsonl")
         assert len(loaded) == len(sequences)
         assert loaded[0]["subject_id"] == sequences[0]["subject_id"]
         assert isinstance(loaded[0]["encounters"][0]["admittime"], pd.Timestamp)

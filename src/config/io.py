@@ -25,26 +25,32 @@ def resolve_path(p: str, dflt: Path=None) -> Path:
     return path
 
 
-def load_sequences_pkl(path: str) -> list[dict]:
-    """Load sequences from pickle file."""
-    with open(path, "rb") as f:
-        sequences = pickle.load(f)
-    print(f"Loaded {len(sequences)} sequences from {path}")
-    return sequences
-
-
-def load_sequences_jsonl(path: str) -> list[dict]:
+def load_sequences(path: Path) -> list[dict]:
     """Load sequences from JSONL, parse ISO datetime strings back to datetime objects"""
+    print(f"[load_sequences] Loading from {path}..")
     sequences = []
-    with open(path) as f:
-        for line in f:
-            record = json.loads(line)
-            for enc in record["encounters"]:
-                enc["admittime"] = pd.Timestamp(enc["admittime"])
-                enc["dischtime"] = pd.Timestamp(enc["dischtime"])
-            sequences.append(record)
-    print(f"Loaded {len(sequences)} sequences from {path}")
-    return sequences
+    try:
+        with open(path) as f:
+            for line in f:
+                record = json.loads(line)
+                for enc in record["encounters"]:
+                    enc["admittime"] = pd.Timestamp(enc["admittime"])
+                    enc["dischtime"] = pd.Timestamp(enc["dischtime"])
+                sequences.append(record)
+        print(f"[load_sequences] loaded {len(sequences)} sequences")
+        return sequences
+    except Exception as e:
+        print(f"[load_sequences] Error loading .jsonl sequences: {e}")
+        pass
+    try:
+        # try pickle
+        with open(path, "rb") as f:
+            sequences = pickle.load(f)
+        print(f"[load_sequences] loaded {len(sequences)} sequences from pickle fallback")
+        return sequences
+    except Exception as e:
+        raise ValueError(f"[load_sequences] Failed to load sequences from {path} as JSONL or pickle.")
+        
 
 
 # --- Data Extraction ---------------------------------------------------------------
@@ -86,39 +92,38 @@ def load_parquets(data_dir: Path) -> tuple:
 
 # --- Model/Training ----------------------------------------------------------------
 def load_checkpoint(
-    ckpt_path: str, device: torch.device,
-    opt=None, scaler=None
+    ckpt_path: Path, 
+    device: torch.device,
+    opt, 
+    scaler=None,
+    loss_history: list[float]=[]
 ):
     from src.models.sequential_jepa import JEPA
     
     print(f"Loading checkpoint from:  {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     
-    # --- load model 
-    model = JEPA(
-        vocab_size       = checkpoint["vocab_size"],
-        embed_dim        = checkpoint["model_params"]["embed_dim"],
-        num_heads        = checkpoint["model_params"]["num_heads"],
-        num_layers       = checkpoint["model_params"]["num_layers"],
-        max_seq_len      = checkpoint["model_params"]["max_seq_len"],
-        ffn_dim          = checkpoint["model_params"]["ffn_dim"],
-        predictor_hidden = checkpoint["model_params"]["predictor_hidden"],
-        tau              = checkpoint["model_params"]["tau"],
-    ).to(device)
+    # --- load model
+    model_p = checkpoint["model_params"]
+    model = JEPA(**model_p).to(device)
     model.load_state_dict(checkpoint["model_sd"])
     print(f"[Load Checkpoint] Model loaded successfully.")
     
     # --- load optimizer
-    if opt is not None and "optimizer_sd" in checkpoint:
-        opt.load_state_dict(checkpoint["optimizer_sd"])
-        print(f"[Load Checkpoint] Optimizer loaded successfully.")
+    opt.load_state_dict(checkpoint["optimizer_sd"])
+    print(f"[Load Checkpoint] Optimizer loaded successfully.")
     
     # --- load scaler if using bfloat16
-    if scaler is not None and "scaler_sd" in checkpoint:
+    if scaler is not None and "scaler_sd" in checkpoint and checkpoint["scaler_sd"]:
         scaler.load_state_dict(checkpoint['scaler'])
         print(f"[Load Checkpoint] Grad scaler loaded successfully.")
-    
-    
-    return model, opt, scaler
+        
+    # --- load other state
+    epoch = checkpoint.get("epoch", 1)
+    if "loss_history" in checkpoint and checkpoint["loss_history"]:
+        loss_history.extend(checkpoint["loss_history"])
+        print(f"[Load Checkpoint] Loss history loaded with {len(checkpoint['loss_history'])} entries.")
+        
+    return model, opt, scaler, epoch, loss_history
     
     
