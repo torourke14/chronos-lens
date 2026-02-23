@@ -84,32 +84,32 @@ def main(device: torch.device, params: Dict) -> None:
     num_layers = model_p.get('num_layers', 0)
     ffn_dim = model_p.get('ffn_dim', 0)
     max_seq_len = model_p.get('max_seq_len', 0)
-    predictor_hidden = model_p.get('predictor_hidden_dim', 0)
+    predictor_hidden = model_p.get('predictor_hidden', 0)
     # --- optimization
     optimization_p = params['optimization']
     epochs = optimization_p.get('epochs', 0)
     tau = optimization_p.get('tau', 0.0)
     # --- artifact settings
     artifact_p = params['artifacts']
-    model_tag = artifact_p.get('tag', '')
-    extract_embeddings = artifact_p.get('extract_embeddings', True)
-    extract_embeddings_every = artifact_p.get('extract_embeddings_every', 5)
-    load_from_checkpoint = artifact_p.get('load_from_checkpoint', False)
-    checkpoint_every = artifact_p.get('checkpoint_every', 5)
+    model_tag = artifact_p.get('model_tag', '')
+    checkpoint = artifact_p.get('checkpoint', None)
+    checkpoint_every = artifact_p.get('checkpoint_every', epochs)
+    log_emb_vecs = artifact_p.get('log_emb_vecs', True)
+    log_emb_vecs_every = artifact_p.get('log_emb_vecs_every', epochs)
     
     # --- path resolution ---
-    out_dir = MODEL_RUNS_BASE_DIR / model_tag
-    out_dir.mkdir(parents=True, exist_ok=True)
+    artifact_folder = MODEL_RUNS_BASE_DIR / model_tag
+    artifact_folder.mkdir(parents=True, exist_ok=True)
 
     # --- init PATIENT SEQUENCES, VOCAB ---
     patients = load_sequences(PROCESSED_DIR / "sequences.jsonl")
     patients = patients[: n_patients]
 
     vocab = build_vocab(patients, pad_idx)
-    vocab_out_path = out_dir / "vocab.json"
+    vocab_out_path = artifact_folder / "vocab.json"
     with open(vocab_out_path, "w", encoding="utf-8") as fh:
         json.dump(vocab, fh, indent=2)
-    print(f"Vocab saved to {vocab_out_path}")
+    print(f"   vocab saved artifact folder")
 
     # --- init MODEL ---
     model = JEPA(
@@ -118,14 +118,13 @@ def main(device: torch.device, params: Dict) -> None:
         tau=tau,
         pad_idx=pad_idx,
     ).to(device)
-    
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable params:  {n_params:,}")
+    print(f"Total trainable params: {n_params:,}")
+    
     
     # -- init dataset ---
     dataset = JEPADataset(patients, vocab)
     assert len(dataset) > 0, "No training samples produced. Ensure patients have at least 2 encounters."
-    print(f"Dataset created: {len(dataset)} samples")
     
     # -- init data loader ---
     loader = DataLoader(
@@ -133,7 +132,6 @@ def main(device: torch.device, params: Dict) -> None:
         shuffle=True,
         collate_fn=collate_fn,
         drop_last=False)
-    print(f"DataLoader created: batch_size={batch_size}, n_batches={len(loader)}")
     
     # --- init optimizer/scheduler ---
     optimizer, scheduler, scaler = init_optimizers(
@@ -147,24 +145,16 @@ def main(device: torch.device, params: Dict) -> None:
     start_epoch = 1
     loss_history: list[float] = []
     
-    if load_from_checkpoint:
+    if checkpoint is not None:
         from src.config.io import load_checkpoint
         model, optimizer, scaler, start_epoch, loss_history = load_checkpoint(
-            out_dir / "model_checkpoint.pt",
+            artifact_folder / f"{checkpoint.removesuffix('.pt')}.pt",
             device=device, 
             opt=optimizer, 
             scaler=None)
-    
-    extract_emb_fn = lambda m, e: None
-    if extract_embeddings:
-        from run_embeddings import extract as ee_fn
-        extract_emb_fn = lambda m, ep: ee_fn(
-            model=m, loader=loader, device=device,
-            out_fn=out_dir / f"embeddings_{model_tag}_ep{ep}.npz")
         
     def save_checkpoint(epoch: int, loss_history: list[float]) -> None:
-        print(f"  Saving checkpoint at epoch {epoch} …")
-        ckpt_path = out_dir / f"ckpt_{model_tag}_ep{epoch}.pt"
+        ckpt_path = artifact_folder / f"checkpoint_ep{epoch}.pt"
         torch.save({
             "epoch":        epoch,
             "loss_history": loss_history,
@@ -184,16 +174,23 @@ def main(device: torch.device, params: Dict) -> None:
                 "pad_idx":      pad_idx,
             },
         }, ckpt_path)
-        print(f"Checkpoint saved to {ckpt_path}")
+    
+    log_emb_vecs_fn = lambda m, ep: None
+    if log_emb_vecs:
+        from run_embeddings import extract_embedding_vecs as eev_fn
+        log_emb_vecs_fn = lambda m, ep: eev_fn(
+            model=m, loader=loader, device=device,
+            out_fn=artifact_folder / f"embeddings_ep{ep}.npz")
 
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
+    print(f"Training for {len(loader)} batches (size: {batch_size}) for {epochs} epochs")
     
     model.train()
     for epoch in range(start_epoch, epochs + 1):
         epoch_losses: list[float] = []
-        epoch_grad_norms: list[float] = []
+        # epoch_grad_norms: list[float] = []
 
         for batch in loader:
             batch_dev = {
@@ -209,14 +206,14 @@ def main(device: torch.device, params: Dict) -> None:
                     loss = F.mse_loss(z_pred, z_target)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+                # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 _, z_pred, z_target = model(batch_dev)
                 loss = F.mse_loss(z_pred, z_target)
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+                # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
                 optimizer.step()
                 
             if scheduler is not None:
@@ -224,19 +221,22 @@ def main(device: torch.device, params: Dict) -> None:
 
             model.update_target_encoder()
             epoch_losses.append(loss.item())
-            epoch_grad_norms.append(grad_norm.item())
+            # epoch_grad_norms.append(grad_norm.item())
 
         mean_loss = float(np.mean(epoch_losses))
-        mean_grad_norm = float(np.mean(epoch_grad_norms))
+        # mean_grad_norm = float(np.mean(epoch_grad_norms))
         loss_history.append(mean_loss)
         
-        print(f"  Epoch {epoch:3d}/{epochs}  loss={mean_loss:.6f}  grad_norm={mean_grad_norm:.4f}")
+        # print(f"  Epoch {epoch:3d}/{epochs}  loss={mean_loss:.6f}  grad_norm={mean_grad_norm:.4f}")
+        print(f"  Epoch {epoch:3d}/{epochs}  loss={mean_loss:.6f}")
         
-        if epoch % checkpoint_every == 0 or epoch == epochs + 1:
+        if checkpoint_every is not None and epoch % checkpoint_every == 0 or epoch == epochs:
             save_checkpoint(epoch, loss_history)
+            print(f"Checkpoint saved to artifact folder at epoch {epoch}")
         
-        if extract_embeddings and epoch % extract_embeddings_every == 0 or epoch == epochs + 1:
-            extract_emb_fn(model, epoch)
+        if log_emb_vecs and epoch % log_emb_vecs_every == 0 or epoch == epochs:
+            log_emb_vecs_fn(model, epoch)
+            print(f"Embedding vecs saved to artifact folder at epoch {epoch}")
     
     # ------------------------------------------------------------------
     # --- POST-TRAINING ------------------------------------------------
@@ -251,7 +251,7 @@ def main(device: torch.device, params: Dict) -> None:
     ax.grid(True, alpha=0.4)
     fig.tight_layout()
 
-    curve_path = out_dir / "loss_curve.png"
+    curve_path = artifact_folder / "loss_curve.png"
     fig.savefig(curve_path, dpi=150)
     plt.close(fig)
-    print(f"Loss curve saved to {curve_path}")
+    print(f"Loss curve saved to artifact folder")

@@ -6,6 +6,7 @@ def build_vocab(patients: list[dict], pad_idx: int) -> dict[str, int]:
     """Map every unique ICD code and med name to a positive integer index.
     Index 0 is reserved for [PAD].
     """
+    print(f"[build_vocab] building vocab ([PAD]: {pad_idx})...")
     tokens: set[str] = set()
     for p in patients:
         for enc in p.get("encounters", []):
@@ -15,15 +16,8 @@ def build_vocab(patients: list[dict], pad_idx: int) -> dict[str, int]:
     for i, tok in enumerate(sorted(tokens), start=1):
         vocab[tok] = i
         
-    print(f"[build_vocab] size: {len(vocab)}")
+    print(f"   len: {len(vocab)}")
     return vocab
-
-
-
-def init_model(device, params):
-    from src.models.sequential_jepa import JEPA
-    model = JEPA(**params).to(device)
-    return model
 
 
 def init_optimizers(
@@ -33,7 +27,7 @@ def init_optimizers(
     opt_params={},
     use_bfloat16=False
 ):
-    base_lr = opt_params.get("base_lr", 0.0)
+    base_lr = float(opt_params.get("base_lr", 0.0))
     optimizer = torch.optim.Adam(model.parameters(), lr=base_lr)
     
     sched_type = opt_params.get("schedule", "")
@@ -51,10 +45,12 @@ def init_optimizers(
             optimizer,
             lr_lambda=lambda step: max(min_lr_ratio, 
                                        1.0 - (1.0 - min_lr_ratio) * step / total_steps))
-    elif sched_type == "linear":
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: base_lr)
+    elif sched_type == "static":
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+    elif sched_type == "" or sched_type is None:
+        scheduler = None
     else:
-        raise ValueError(f"[init_optimizers] Unknown scheduler '{sched_type}'. Expected 'warmup_cosine_annealing', 'linear_decay', or 'linear'")
+        raise ValueError(f"[init_optimizers] Unknown scheduler '{sched_type}'. Expected 'warmup_cosine_annealing', 'linear_decay', 'linear', or 'static'")
     
     scaler = GradScaler('cuda') if use_bfloat16 else None
     return optimizer, scheduler, scaler

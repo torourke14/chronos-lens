@@ -1,22 +1,26 @@
 data:
     batch_size: 8
-    n_patients: 50                  # Max patients to load
-    pad_idx: 0                      # token index reserved for padding
-    data_dir: "data/processed"      # not required to change, if needed
-artifacts:
-    output_dir: "artifacts/runs"    # not required to change, if needed
-    tag: "model-64-ep10"            # unique tag (artifacts folder created under artifacts/runs)
-    run_emb_extraction_post: True   # whether to run embedding extraction after training
+    n_patients: 50                      # Max patients to load
+    pad_idx: 0                          # token index reserved for padding
+    use_bfloat16: False                 # use bfloat16 precision for training
 model:
     embed_dim: 64
     num_heads: 2
     num_layers: 2
-    ffn_dim: 256                    # 4 × EMBED_DIM
-    max_seq_len: 128                # positional embedding capacity
-    predictor_hidden_dim: 128
+    ffn_dim: 256                        # 4 × EMBED_DIM
+    max_seq_len: 128                    # positional embedding capacity
+    predictor_hidden: 128
 optimization:
-    load_from_checkpoint: False
-    checkpoint_every: 5
-    epochs: 10
-    lr: .001
-    tau: 0.996                      # EMA momentum
+    epochs: 12
+    tau: 0.996                          # EMA momentum
+    base_lr: 1e-3
+    schedule: "static"                  # warmup_cosine - base_lr, ref_lr, warmup_epochs, T_max
+                                        # static - base_lr
+                                        # linear_decay - base_lr, min_lr_ratio, total_steps
+artifacts:
+    model_tag: "test-64-config"         # unique tag (artifacts folder created under artifacts/runs)
+    # checkpoint: 'model_checkpoint.pt'   # if provided, loads from here
+    checkpoint_every: 5                 # default: # epochs (once at end)
+    log_emb_vecs: True                  # enable/disable embedding vec extraction (default: True)
+    log_emb_vecs_every: 5               # log embedding vec calculations every n epochs
+                                        # default: # epochs (once at end)

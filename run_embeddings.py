@@ -19,6 +19,7 @@ CLI
 import argparse
 import json
 from pathlib import Path
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -32,18 +33,18 @@ from src.training.dataset import JEPADataset, collate_fn
 from src.models.sequential_jepa import JEPA
 
 
+rng = np.random.default_rng(42)
+
 # =============================================================================
 # Embedding extraction
 # =============================================================================
 
 @torch.no_grad()
-def extract_embeddings(
+def calc_embedding_vecs(
     model: JEPA,
     loader: DataLoader,
     device: torch.device,
 ) -> tuple:
-    print("\nExtracting embeddings...")
-    
     model.eval()
     all_z_ctx:  list[np.ndarray] = []
     all_z_pred: list[np.ndarray] = []
@@ -77,91 +78,66 @@ def extract_embeddings(
     return z_context, z_pred_arr, z_target, delta, subject_ids, mask_positions, labels
 
 
-# -----------------------------------------------------------------------------
-# Sanity checks (no loss history - pure geometry on the embedding arrays)
-# -----------------------------------------------------------------------------
-
 def run_sanity_checks(
-    z_context:  np.ndarray,
-    z_pred:     np.ndarray,
-    z_target:   np.ndarray,
-    delta:      np.ndarray,
+    z_context: np.ndarray,
+    z_pred:    np.ndarray,
+    z_target:  np.ndarray,
+    delta:     np.ndarray,
+    frac_nontrivial_thresh: float = 0.5
 ) -> bool:
-    print("\n" + "=" * 62)
-    print("SANITY CHECKS")
-    print("=" * 62)
+    checks: Dict[str, tuple[bool, Any]] = {}
 
-    results: list[tuple[bool, str]] = []
-
-    # 1. Consistent N_samples across all arrays
-    n_samples = {
-        "z_context": z_context.shape[0],
-        "z_pred":    z_pred.shape[0],
-        "z_target":  z_target.shape[0],
-        "delta":     delta.shape[0],
-    }
-    ok1 = len(set(n_samples.values())) == 1
-    results.append((ok1, f"Consistent N_samples: {n_samples}"))
-
-    # 2. z_pred has non-trivial variance (std > 0.01 per dimension)
+    # Check z_pred has non-trivial variance (std > 0.01 per dimension)
     pred_std        = z_pred.std(axis=0)
     frac_nontrivial = float((pred_std > 0.01).mean())
-    ok2             = frac_nontrivial > 0.5
-    results.append((ok2, (
-        f"z_pred non-trivial variance: "
-        f"min_std={pred_std.min():.4f}, "
-        f"frac_dims(>0.01)={frac_nontrivial:.1%}"
-    )))
+    z_pred_ok = frac_nontrivial > frac_nontrivial_thresh
+    
+    checks['nontrivial_variance'] = (z_pred_ok, (
+        f"z_pred min_std={pred_std.min():.4f}, "
+        f"z_pred frac_dims(>0.01)={frac_nontrivial:.1%}"
+    ))
 
-    # 3. ||Delta|| distribution stats
+    # Check displacement field ||Delta|| hasn't collapsed
     delta_norms = np.linalg.norm(delta, axis=-1)
-    ok3 = delta_norms.std() > 1e-4
-    results.append((ok3, (
-        f"||Δ|| distribution: "
+    delt_norm_ok = delta_norms.std() > 1e-4
+    checks['delta_norms'] = (delt_norm_ok, (
         f"mean={delta_norms.mean():.4f}, "
         f"std={delta_norms.std():.4f}, "
         f"min={delta_norms.min():.4f}, "
         f"max={delta_norms.max():.4f}"
-    )))
+    ))
 
-    # 4. Predictor beats a random baseline scaled to z_target's distribution
-    rng       = np.random.default_rng(42)
-    rand_pred = rng.standard_normal(z_pred.shape).astype(np.float32) \
-                * z_target.std() + z_target.mean()
+    # Check the predictor beats a random baseline scaled to z_target's distribution
+    rand_pred = rng.standard_normal(z_pred.shape).astype(np.float32) * z_target.std() + z_target.mean()
     pred_dist = float(np.linalg.norm(z_pred    - z_target, axis=-1).mean())
-    rand_dist = float(np.linalg.norm(rand_pred - z_target, axis=-1).mean())
-    ok4       = pred_dist < rand_dist
-    results.append((ok4, (
-        f"Predictor beats random: "
+    rand_dist = float(np.linalg.norm(rand_pred - z_target, axis=-1).mean()) 
+    checks['predictor_v_random'] = (pred_dist < rand_dist, (
         f"||z_pred-z_tgt||={pred_dist:.4f} vs "
         f"||rand-z_tgt||={rand_dist:.4f}"
-    )))
+    ))
 
-    for idx, (ok, msg) in enumerate(results, start=1):
-        print(f"  [{'PASS' if ok else 'FAIL'}] {idx}. {msg}")
+    for k, (ok, msg) in checks.items():
+        if not ok:
+            print(f"="*10 + "EMBEDDING STATE FAILURE" + "="*10)
+            for k, (ok, msg) in checks.items():
+                print(f"{k:20s} : {'PASS' if ok else 'FAIL'}  ({msg})")
+            return False
+    return True
 
-    n_pass = sum(ok for ok, _ in results)
-    print(f"\n  {n_pass}/{len(results)} checks passed.")
-    print("=" * 62 + "\n")
-    return n_pass == len(results)
 
-
-
-def extract(
+def extract_embedding_vecs(
     model: JEPA,
     loader: DataLoader,
     device: torch.device,
-    out_fn: Path,
+    out_fn: Path
 ):    
     model.eval()
 
-    # -- Extract -----------------------------------------------------------
     z_context, z_pred, z_target, delta, subject_ids, mask_positions, labels = \
-        extract_embeddings(model, loader, device)
+        calc_embedding_vecs(model, loader, device)
 
-    # don't save if embeddings not statistically sane (e.g. predictor collapsed)
+    # don't save if predictor collapsed
     all_passed = run_sanity_checks(z_context, z_pred, z_target, delta)
-
     if not all_passed:
         print("Embeddings NOT saved: one or more sanity checks failed.")
         return
@@ -176,14 +152,6 @@ def extract(
         mask_positions = mask_positions,
         labels         = labels,
     )
-    print(f"Embeddings saved to {out_fn}")
-    print(f"  z_context      : {z_context.shape}")
-    print(f"  z_pred         : {z_pred.shape}")
-    print(f"  z_target       : {z_target.shape}")
-    print(f"  delta          : {delta.shape}")
-    print(f"  subject_ids    : {subject_ids.shape}")
-    print(f"  mask_positions : {mask_positions.shape}")
-    print(f"  labels         : {labels.shape}")
 
 
 def extract_from_checkpoint(
@@ -205,38 +173,32 @@ def extract_from_checkpoint(
     sequences_path = PROCESSED_DIR / "sequences.jsonl"
     assert sequences_path.exists(), f"[extract_from_checkpoint] Sequences file not found: {sequences_path}"
     
-    # -- Reconstruct model from checkpoint
+    # --- reconstruct model from checkpoint
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
-    # --- load model
     model_p = checkpoint["model_params"]
     model = JEPA(**model_p).to(device)
     model.load_state_dict(checkpoint["model_sd"])
-    print(f"[extract_from_checkpoint] Model loaded from checkpoint successfully.")
     
-    # --- Build vocab/dataset/dataloader -----------------------------------------------------
+    # --- Build vocab/dataset/data loader
     with open(vocab_path, encoding="utf-8") as fh:
         vocab = json.load(fh)
-    assert vocab is not None and len(vocab) > 0, "Vocab loading failed."
-    print(f"[extract_from_checkpoint]vocab loaded vocab")
     
-    # --- load patients
     patients = load_sequences(sequences_path)
     if n_patients is not None:
         patients = patients[: n_patients]
-    print(f"[extract_from_checkpoint] Loaded {len(patients)} patient sequences")
-    
-    # ---
+        
     dataset = JEPADataset(patients, vocab)
-    assert len(dataset) > 0, "No samples produced. Check that patients have >=2 encounters."
-    print(f"[extract_from_checkpoint] Loaded dataset with {len(dataset)} samples")
-
     loader = DataLoader(dataset, batch_size=batch_size,
                         shuffle=False, collate_fn=collate_fn)
     
+    print(f"[extract_from_checkpoint] Loaded {ckpt_fn} for extraction",
+          f"   vocab: {len(vocab)} tokens",
+          f"   patients: {len(patients)} sequences",
+          f"   dataset: {len(dataset)} samples")
+    
     ep_str = f"_ep{checkpoint['epoch']}" if "epoch" in checkpoint else ""
-    extract(model, loader=loader, device=device, 
+    extract_embedding_vecs(model, loader=loader, device=device, 
             out_fn=artifact_dir / f"embeddings_{model_tag}{ep_str}.npz")
     
 

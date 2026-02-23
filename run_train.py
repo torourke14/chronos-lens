@@ -18,7 +18,7 @@ parser.add_argument(
 def main():
     args = parser.parse_args()
     
-    cfg_fp = resolve_path(f"configs/{args.cfg.strip('.yaml').strip('.yml')}.yaml")
+    cfg_fp = resolve_path(f"configs/{args.cfg.removesuffix('.yaml').removesuffix('.yml')}.yaml")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nDevice: {device}")
 
