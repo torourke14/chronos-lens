@@ -177,7 +177,7 @@ def main(device: torch.device, params: Dict) -> None:
     
     log_emb_vecs_fn = lambda m, ep: None
     if log_emb_vecs:
-        from run_embeddings import extract_embedding_vecs as eev_fn
+        from scripts.run_embeddings import extract_embedding_vecs as eev_fn
         log_emb_vecs_fn = lambda m, ep: eev_fn(
             model=m, loader=loader, device=device,
             out_fn=artifact_folder / f"embeddings_ep{ep}.npz")
