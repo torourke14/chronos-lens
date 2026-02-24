@@ -15,7 +15,7 @@ from src.mimic.helper import (
   validate_sequences, 
   validate_save_load)
 from src.mimic.baseline import run_baseline
-from src.config.io import (
+from src.utils.io import (
   resolve_path,
   PROCESSED_DIR)
 

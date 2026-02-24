@@ -4,7 +4,7 @@ import argparse
 import pprint
 import yaml
 import torch
-from src.config.io import MODEL_RUNS_BASE_DIR, PROCESSED_DIR, resolve_path
+from src.utils.io import MODEL_RUNS_BASE_DIR, PROCESSED_DIR, resolve_path
 from src.train import main as app_main
   
 

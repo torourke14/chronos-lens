@@ -7,7 +7,7 @@ import pickle
 import numpy as np
 import pandas as pd
 
-from src.config.io import load_sequences
+from src.utils.io import load_sequences
 
 
 def save_dataset(

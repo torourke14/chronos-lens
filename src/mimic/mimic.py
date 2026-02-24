@@ -39,7 +39,7 @@ import pandas as pd
 import google.auth
 from google.cloud import bigquery
 
-from src.config.io import (
+from src.utils.io import (
     load_parquets, 
     save_parquets,
     PARQUET_DIR)

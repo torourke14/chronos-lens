@@ -6,7 +6,7 @@ import json
 import torch
 from torch.utils.data import DataLoader
 
-from src.config.io import (
+from src.utils.io import (
     load_sequences, 
     PROCESSED_DIR,
     MODEL_RUNS_BASE_DIR)

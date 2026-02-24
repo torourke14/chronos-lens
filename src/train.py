@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 
 from src.models.sequential_jepa import JEPA
 from src.training.dataset import JEPADataset, collate_fn
-from src.config.io import (
+from src.utils.io import (
     MODEL_RUNS_BASE_DIR, 
     PROCESSED_DIR, 
     load_sequences)
@@ -146,7 +146,7 @@ def main(device: torch.device, params: Dict) -> None:
     loss_history: list[float] = []
     
     if checkpoint is not None:
-        from src.config.io import load_checkpoint
+        from src.utils.io import load_checkpoint
         model, optimizer, scaler, start_epoch, loss_history = load_checkpoint(
             artifact_folder / f"{checkpoint.removesuffix('.pt')}.pt",
             device=device, 
