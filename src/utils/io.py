@@ -1,6 +1,6 @@
 from pathlib import Path
 import json
-import pickle
+# import pickle
 
 import pandas as pd
 import torch
@@ -25,8 +25,21 @@ def resolve_path(p: str, dflt: Path=None) -> Path:
     return path
 
 
+def load_sequences_dict(path: Path) -> dict:
+    """Load sequences from JSONL into dict of dicts"""
+    patients = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            p = json.loads(line)
+            patients[str(p["subject_id"])] = p
+    return patients
+    
+
 def load_sequences(path: Path) -> list[dict]:
-    """Load sequences from JSONL, parse ISO datetime strings back to datetime objects"""
+    """Load sequences from JSONL into list of dicts, parse ISO datetime strings back to datetime objects"""
     print(f"[load_sequences] Loading sequences..")
     sequences = []
     try:
@@ -40,16 +53,10 @@ def load_sequences(path: Path) -> list[dict]:
         print(f"   loaded {len(sequences)} sequences")
         return sequences
     except Exception as e:
-        print(f"   Error loading .jsonl sequences: {e}")
-        pass
-    try:
-        # try pickle
-        with open(path, "rb") as f:
-            sequences = pickle.load(f)
-        print(f"   loaded {len(sequences)} sequences from pickle fallback")
-        return sequences
-    except Exception as e:
-        raise ValueError(f"   Failed to load sequences from {path} as JSONL or pickle.")
+        raise FileNotFoundError(f"   Error loading .jsonl sequences: {e}")
+    # # try pickle
+    # with open(path, "rb") as f:
+    #     sequences = pickle.load(f)
         
 
 
