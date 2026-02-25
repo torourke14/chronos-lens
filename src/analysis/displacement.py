@@ -62,7 +62,7 @@ def calc_embedding_vecs(
     return z_context, z_pred_arr, z_target, delta, subject_ids, mask_positions, labels
 
 
-def run_sanity_checks(
+def run_disp_field_checks(
     z_context: np.ndarray,
     z_pred:    np.ndarray,
     z_target:  np.ndarray,
@@ -127,18 +127,14 @@ def extract_embedding_vecs(
         calc_embedding_vecs(model, loader, device)
 
     # don't save if predictor collapsed
-    all_passed = run_sanity_checks(z_context, z_pred, z_target, delta)
+    all_passed = run_disp_field_checks(z_context, z_pred, z_target, delta)
     if not all_passed:
         print("Embeddings NOT saved: one or more sanity checks failed.")
         return
 
-    np.savez(
-        out_fn,
-        z_context      = z_context,
-        z_pred         = z_pred,
-        z_target       = z_target,
-        delta          = delta,
-        subject_ids    = subject_ids,
-        mask_positions = mask_positions,
-        labels         = labels,
-    )
+    np.savez(out_fn,
+             z_context = z_context, z_pred = z_pred, z_target = z_target,
+             delta = delta,
+             subject_ids = subject_ids,
+             mask_positions = mask_positions,
+             labels = labels,)

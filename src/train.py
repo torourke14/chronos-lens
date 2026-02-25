@@ -53,6 +53,7 @@ torch.backends.cudnn.benchmark = False
 def main(device: torch.device, params: Dict) -> None:
     # --- Params passed from config file ---
     # Purposefully set to bad defaults to avoid silent errors
+    model_tag = params['tag']
     # --- data settings
     data_p = params['data']
     batch_size = data_p.get('batch_size', 0)
@@ -73,7 +74,6 @@ def main(device: torch.device, params: Dict) -> None:
     tau = optimization_p.get('tau', 0.0)
     # --- artifact settings
     artifact_p = params['artifacts']
-    model_tag = artifact_p.get('model_tag', '')
     checkpoint = artifact_p.get('checkpoint', None)
     checkpoint_every = artifact_p.get('checkpoint_every', epochs)
     log_emb_vecs = artifact_p.get('log_emb_vecs', True)
