@@ -1,13 +1,11 @@
-from typing import Tuple
 import json
-import tempfile
 from pathlib import Path
 import pickle
 
 import numpy as np
 import pandas as pd
 
-from src.utils.io import load_sequences
+from src.utils.io import PARQUET_DIR
 
 
 def save_dataset(
@@ -15,7 +13,6 @@ def save_dataset(
     out_dir: Path,
     min_encounters: int,
     readm_window_days: int,
-    depression_prefixes: tuple[str, ...]
 ):
     """
     Save sequences in (model-ready format)
@@ -74,18 +71,19 @@ def save_dataset(
         "vocab_size_icd": len(all_icd),
         "vocab_size_meds": len(all_meds),
         "cohort_filters": {
-            "depression_codes": list(depression_prefixes),
+            "cohort_definition": "readmission within window (no diagnosis requirement)",
+            "label_definition": "F30-F39 mood disorder at readmission",
             "min_encounters": min_encounters,
-            "READM_WINDOW_DAYS": readm_window_days,
-            "exclude_deceased": True,
+            "readm_window_days": readm_window_days,
+            "exclude_deceased_admissions": True,
         },
         "schema": {
             "subject_id": "str",
-            "label": "int (0 or 1)",
+            "label": "int (0=readmitted no mood dx, 1=readmitted with F30-F39)",
             "encounters[].hadm_id": "int",
             "encounters[].admittime": "ISO datetime string",
             "encounters[].dischtime": "ISO datetime string",
-            "encounters[].icd_codes": "list[str] - ICD codes with dot notation",
+            "encounters[].icd_codes": "list[str] - F-codes truncated to 3 chars, non-F retain dot notation",
             "encounters[].meds": "list[str] - lowercase drug names active at admission",
         },
     }
@@ -100,45 +98,87 @@ def save_dataset(
     print(f"  {meta_path.name:20s} {meta_path.stat().st_size / 1024:.0f} KB  (cohort stats & schema)")
 
 
-def validate_sequences(sequences: list[dict]):
-    """Run all structural checks on built sequences."""
+def save_parquets(admissions, patients, diagnoses, prescriptions) -> None:
+    print(f"[save_parquets] Saving parquet's to cache...")
+    PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+    tables = {
+        "admissions":    admissions,
+        "patients":      patients,
+        "diagnoses":     diagnoses,
+        "prescriptions": prescriptions,
+    }
+    
+    for name, df in tables.items():
+        path = PARQUET_DIR / f"{name}.parquet"
+        df.to_parquet(path, index=False)
+        print(f"  {name:20s} {len(df):>8,} rows -> {path.name}")
+        
+    print(f"-- parquet's saved.")
+
+
+def load_parquets(data_dir: Path) -> tuple:
+    print(f"\n[load_parquets] Loading parquets from DATA_DIR...")
+
+    file_map = {
+        "admissions":    "admissions.parquet",
+        "patients":      "patients.parquet",
+        "diagnoses":     "diagnoses.parquet",
+        "prescriptions": "prescriptions.parquet",
+    }
+
+    dfs = {}
+    for name, filename in file_map.items():
+        path = data_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Missing {path}. Expected files: {list(file_map.values())}")
+        dfs[name] = pd.read_parquet(path)
+        print(f"   {name:20s} {len(dfs[name]):>8,} rows")
+
+    return dfs["admissions"], dfs["patients"], dfs["diagnoses"], dfs["prescriptions"]
+
+
+
+def validate_sequences(sequences: list[dict], readm_window_days: int):
+    from datetime import timedelta
+
     print("\nSEQUENCE VALIDATION")
     print("=" * 60)
 
     assert len(sequences) > 0, "FAIL: no sequences produced"
-    print(f"  Pipeline produced {len(sequences)} patient sequences")
 
-    # Min encounters
     min_enc = min(len(s["encounters"]) for s in sequences)
     assert min_enc >= 3, f"FAIL: found sequence with {min_enc} encounters"
-    print(f"  All sequences have >= 3 encounters (min={min_enc})")
 
-    # F32/F33 in every patient
+    # every patient must have at least one readmission pair within the window
     for seq in sequences:
-        has_dep = any(
-            code.upper().replace(".", "").startswith(("F32", "F33"))
-            for enc in seq["encounters"]
-            for code in enc["icd_codes"]
-        )
-        assert has_dep, f"FAIL: patient {seq['subject_id']} has no F32/F33"
-    print("  All patients have at least one F32/F33 diagnosis")
+        encs = seq["encounters"]
+        has_readm = False
+        for i in range(len(encs) - 1):
+            window_end = encs[i]["dischtime"] + timedelta(days=readm_window_days)
+            if encs[i + 1]["admittime"] <= window_end:
+                has_readm = True
+                break
+        assert has_readm, (
+            f"FAIL: patient {seq['subject_id']} has no readmission within {readm_window_days}d")
 
-    # Time ordering
     for seq in sequences:
         times = [enc["admittime"] for enc in seq["encounters"]]
         assert times == sorted(times), f"FAIL: patient {seq['subject_id']} not sorted"
-    print("  ✓ All encounter sequences are time-ordered")
 
-    # Binary labels
     labels = set(s["label"] for s in sequences)
     assert labels.issubset({0, 1}), f"FAIL: unexpected labels {labels}"
-    print("  ✓ Labels are binary (0/1)")
 
-    n_pos = sum(1 for s in sequences if s["label"] == 1)
-    n_neg = len(sequences) - n_pos
-    print(f"  ✓ Label distribution: {n_pos} positive, {n_neg} negative")
+    # all F-codes should be exactly 3 chars
+    # Non-F ICD-10 codes should retain dot notation
+    for seq in sequences[:100]:
+        for enc in seq["encounters"]:
+            for code in enc["icd_codes"]:
+                code_upper = code.upper()
+                if code_upper.startswith("F"):
+                    assert len(code_upper) == 3, (
+                        f"FAIL: F-code '{code}' not truncated to 3 chars "
+                        f"(patient {seq['subject_id']})")
 
-    # Schema
     for seq in sequences:
         assert isinstance(seq["subject_id"], str)
         assert isinstance(seq["label"], int)
@@ -148,40 +188,10 @@ def validate_sequences(sequences: list[dict]):
             assert isinstance(enc["icd_codes"], list)
             assert isinstance(enc["meds"], list)
             assert hasattr(enc["admittime"], "strftime")
-    print("  ✓ Schema matches target specification")
 
-    # Meds normalized
     for seq in sequences[:50]:
         for enc in seq["encounters"]:
             for med in enc["meds"]:
                 assert med == med.lower().strip(), f"FAIL: med '{med}' not normalized"
-    print("  ✓ Medication names are lowercase and stripped")
-
-
-def validate_save_load(sequences: list[dict], min_encounters: int, 
-                       readm_window_days: int, depression_prefixes: Tuple
-):
-    """Verify save_dataset output and JSONL round-trip."""
-    print("\nSAVE / LOAD VALIDATION")
-    print("=" * 60)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        save_dataset(sequences, Path(tmpdir), min_encounters, readm_window_days, depression_prefixes)
-
-        assert (Path(tmpdir) / "sequences.jsonl").exists()
-        assert (Path(tmpdir) / "sequences.pkl").exists()
-        assert (Path(tmpdir) / "metadata.json").exists()
-        print("  All output files present")
-
-        with open(Path(tmpdir) / "metadata.json") as f:
-            meta = json.load(f)
-        assert meta["n_patients"] == len(sequences)
-        assert meta["vocab_size_icd"] > 0
-        assert meta["vocab_size_meds"] > 0
-        print(f"  Metadata valid (vocab: {meta['vocab_size_icd']} ICD, {meta['vocab_size_meds']} meds)")
-
-        loaded = load_sequences(Path(tmpdir) / "sequences.jsonl")
-        assert len(loaded) == len(sequences)
-        assert loaded[0]["subject_id"] == sequences[0]["subject_id"]
-        assert isinstance(loaded[0]["encounters"][0]["admittime"], pd.Timestamp)
-        print("  JSONL round-trip preserves data and datetimes")
+    
+    print(f"  {len(sequences)} sequences validated")

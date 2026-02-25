@@ -57,48 +57,6 @@ def load_sequences(path: Path) -> list[dict]:
     # # try pickle
     # with open(path, "rb") as f:
     #     sequences = pickle.load(f)
-        
-
-
-# --- Data Extraction ---------------------------------------------------------------
-def save_parquets(admissions, patients, diagnoses, prescriptions) -> None:
-    print(f"[save_parquets] Saving parquet's to cache...")
-    PARQUET_DIR.mkdir(parents=True, exist_ok=True)
-    tables = {
-        "admissions":    admissions,
-        "patients":      patients,
-        "diagnoses":     diagnoses,
-        "prescriptions": prescriptions,
-    }
-    
-    for name, df in tables.items():
-        path = PARQUET_DIR / f"{name}.parquet"
-        df.to_parquet(path, index=False)
-        print(f"  {name:20s} {len(df):>8,} rows -> {path.name}")
-        
-    print(f"-- parquet's saved.")
-
-
-def load_parquets(data_dir: Path) -> tuple:
-    print(f"[load_parquets] Loading parquets from DATA_DIR...")
-
-    file_map = {
-        "admissions":    "admissions.parquet",
-        "patients":      "patients.parquet",
-        "diagnoses":     "diagnoses.parquet",
-        "prescriptions": "prescriptions.parquet",
-    }
-
-    dfs = {}
-    for name, filename in file_map.items():
-        path = data_dir / filename
-        if not path.exists():
-            raise FileNotFoundError(f"Missing {path}. Expected files: {list(file_map.values())}")
-        dfs[name] = pd.read_parquet(path)
-        print(f"   {name:20s} {len(dfs[name]):>8,} rows")
-
-    return dfs["admissions"], dfs["patients"], dfs["diagnoses"], dfs["prescriptions"]
-
 
 # --- Model/Training ----------------------------------------------------------------
 def load_checkpoint(

@@ -1,8 +1,8 @@
 """
 MIMIC-IV Patient Sequence Feature Extraction Pipeline functions
 ===================================================
-Build patient-level temporal sequences from MIMIC-IV v3.1 (BigQuery) 
-for 90-day psychiatric readmission prediction.
+Build patient-level temporal sequences from MIMIC-IV v3.1 (BigQuery)
+for mood-disorder readmission prediction.
 
 Schema per patient:
 {
@@ -12,37 +12,35 @@ Schema per patient:
       "hadm_id": int,
       "admittime": datetime,
       "dischtime": datetime,
-      "icd_codes": ["F32.1", "I10", ...],
-      "meds": ["sertraline", "metformin", ...]
+      "icd_codes": ["F32", "I10.1", ...],
+      "meds": ["sertraline", ...]
     }, ...
   ],
-  "label": int  # 1 if any subsequent admission has F-code within 90 days of dischtime
+  "label": int  # 1 if readmission within window has F30-F39 diagnosis; 0 otherwise
 }
 
 Cohort filters:
-  - At least one admission with F32/F33 as primary or secondary diagnosis
-  - Minimum 3 encounters per patient
+  - All patients readmitted within [readm_window_days] of discharge (no diagnosis requirement)
+  - min 3 encounters per patient
   - Exclude deceased during admission (hospital_expire_flag = 0, deathtime is null)
 
-BigQuery auth setup:
+ICD code processing:
+  - F-codes truncated to 3-char block level (F32.1 -> F32)
+  - Non-F ICD-10 codes retain full dot notation (I10.1 stays I10.1)
+
+BigQuery auth:
   gcloud auth application-default login
   gcloud config set project aihc-463505
 """
 
-from typing import Tuple
-import warnings
 from datetime import timedelta
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import google.auth
 from google.cloud import bigquery
 
-from src.utils.io import (
-    load_parquets, 
-    save_parquets,
-    PARQUET_DIR)
+from src.mimic.helper import load_parquets, save_parquets
+from src.utils.io import PARQUET_DIR
 
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -78,7 +76,7 @@ def load_tables(dataset: str, project_id: str = None) -> tuple:
     if project_id is None:
         project_id = detected_project
     client = bigquery.Client(project=project_id, credentials=credentials)
-    print(f"Loading from BigQuery ({dataset}) from {project_id}...")
+    print(f"\nLoading from BigQuery ({dataset}) from {project_id}...")
     
     bq_tables = {
         "admissions":    f"{dataset}.admissions",
@@ -99,13 +97,7 @@ def load_tables(dataset: str, project_id: str = None) -> tuple:
 
 
 def clean_admissions(admissions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Filter to alive-at-discharge admissions and parse datetimes.
-
-    Note: patients table is NOT merged here. Demographics are deliberately
-    excluded from encounter sequences. patients table is only needed if 
-    demographics are later added as an experiment.
-    """
+    """ Filter to alive-at-discharge admissions and parse datetimes """
     adm = admissions[["subject_id", "hadm_id", "admittime", "dischtime",
                        "deathtime", "hospital_expire_flag"]].copy()
 
@@ -113,8 +105,6 @@ def clean_admissions(admissions: pd.DataFrame) -> pd.DataFrame:
     adm["dischtime"] = pd.to_datetime(adm["dischtime"])
 
     n_before = len(adm)
-
-    # alive at discharge, valid time range
     adm = adm[
         (adm["hospital_expire_flag"] == 0)
         & (adm["deathtime"].isna())
@@ -127,41 +117,59 @@ def clean_admissions(admissions: pd.DataFrame) -> pd.DataFrame:
     return adm
 
 
-def build_admission_icd_codes(diagnoses: pd.DataFrame, depr_prefixes: Tuple, psych_prefix: str) -> pd.DataFrame:
+def build_admission_icd_codes(diagnoses: pd.DataFrame, label_prefix: str) -> pd.DataFrame:
     """
-    Group all billed ICD codes per admission.
+    Group all ICD codes per admission.
 
     Returns DataFrame with columns:
-        hadm_id, icd_codes (list[str]), has_depression (bool), has_fcode (bool)
+        hadm_id, icd_codes (list[str]), has_label_dx (bool)
 
-    ICD-10 codes format: dot notation (e.g., F32.1).
-    ICD-9 codes format: as-is (e.g., 296.00).
+    ICD-10 F-codes: truncated to 3-char block level (e.g., F32.1 -> F32).
+    Non-F ICD-10 codes: retain full dot notation (e.g., I10.1).
+    ICD-9 codes: as-is.
     """
     dx = diagnoses[["hadm_id", "icd_code", "icd_version"]].copy()
 
     # strip whitespace, uppercase, remove dots for matching
-    dx["icd_clean"] = dx["icd_code"].astype(str).str.strip().str.replace(".", "", regex=False).str.upper()
-
-    # Display format: insert dot after 3rd char for ICD-10 codes > 3 chars
-    is_icd10_long = (dx["icd_version"] == 10) & (dx["icd_clean"].str.len() > 3)
-    dx["icd_display"] = dx["icd_code"]  # default: keep original
-    dx.loc[is_icd10_long, "icd_display"] = (
-        dx.loc[is_icd10_long, "icd_clean"].str[:3] + "." + dx.loc[is_icd10_long, "icd_clean"].str[3:]
+    dx["icd_clean"] = (
+        dx["icd_code"].astype(str).str.strip()
+        .str.replace(".", "", regex=False).str.upper()
     )
 
-    dx["is_depression"] = dx["icd_clean"].str.startswith(depr_prefixes)
-    dx["is_fcode"] = (dx["icd_version"] == 10) & dx["icd_clean"].str.startswith(psych_prefix)
+    # --- Display format ---
+    # Default: keep original
+    dx["icd_display"] = dx["icd_code"]
 
-    adm_dx = (dx.groupby("hadm_id")
+    # ICD-10 F-codes: truncate to block level (3 chars)
+    is_fcode = (dx["icd_version"] == 10) & dx["icd_clean"].str.startswith("F")
+    dx.loc[is_fcode, "icd_display"] = dx.loc[is_fcode, "icd_clean"].str[:3]
+
+    # ICD-10 non-F codes: insert dot after 3rd char
+    is_icd10_long_non_f = ((dx["icd_version"] == 10) &
+                           (~is_fcode) &
+                           (dx["icd_clean"].str.len() > 3))
+
+    dx.loc[is_icd10_long_non_f, "icd_display"] = (
+        dx.loc[is_icd10_long_non_f, "icd_clean"].str[:3] +
+        "." +
+        dx.loc[is_icd10_long_non_f, "icd_clean"].str[3:])
+
+    # --- Label flag: F30-F39 (mood disorder) ---
+    dx["has_label_dx"] = (dx["icd_version"] == 10) & dx["icd_clean"].str.startswith(label_prefix)
+
+    # deduplicate display codes per admission before grouping
+    dx = dx.drop_duplicates(subset=["hadm_id", "icd_display"])
+
+    adm_dx = (
+        dx.groupby("hadm_id")
         .agg(
             icd_codes=("icd_display", list),
-            has_depression=("is_depression", "any"),
-            has_fcode=("is_fcode", "any"),
+            has_label_dx=("has_label_dx", "any"),
         ).reset_index()
     )
 
     print(f"  Admissions with diagnoses: {len(adm_dx):,}")
-    print(f"  Admissions with F32/F33:   {adm_dx['has_depression'].sum():,}")
+    print(f"  Admissions with {label_prefix}* (mood dx): {adm_dx['has_label_dx'].sum():,}")
     return adm_dx
 
 
@@ -174,13 +182,13 @@ def build_admission_active_meds(
         starttime <= admittime <= stoptime
 
     Returns DataFrame with columns:
-        hadm_id, meds (list[str] — lwc drug names)
+        hadm_id, meds (list[str] - lwc drug names)
     """
     rx = prescriptions[["hadm_id", "drug", "starttime", "stoptime"]].copy()
     rx["starttime"] = pd.to_datetime(rx["starttime"], errors="coerce")
     rx["stoptime"] = pd.to_datetime(rx["stoptime"], errors="coerce")
 
-    # Drop rows with missing times
+    # Drop missing times
     rx = rx.dropna(subset=["starttime", "stoptime"])
 
     # Merge admittime
@@ -209,11 +217,16 @@ def build_patient_sequences(
     prescriptions: pd.DataFrame,
     min_encounters: int,
     readm_window_days: int,
-    depression_prefixes: Tuple,
-    psych_prefix: str
+    label_prefix: str
 ) -> list[dict]:
     """
-    Main extraction file: builds patient sequences w/[readm_window_days]-day psychiatric readmission labels.
+    Main extraction: builds patient sequences with readmission-based cohort
+    and mood-disorder (F30-F39) labels.
+
+    Cohort: all patients with at least one readmission within [readm_window_days]
+    days of a prior discharge, plus >= [min_encounters] encounters total.
+
+    Label: 1 if the readmission includes an F30-F39 diagnosis; 0 otherwise.
 
     Args:
         admissions:  MIMIC-IV admissions table
@@ -221,7 +234,8 @@ def build_patient_sequences(
         diagnoses:   MIMIC-IV diagnoses_icd table
         prescriptions: MIMIC-IV prescriptions table
         min_encounters: minimum encounters per patient for inclusion
-        READM_WINDOW_DAYS: window for psychiatric readmission label
+        readm_window_days: window for readmission cohort inclusion and label computation
+        label_prefix: ICD-10 prefix for positive label (e.g. "F3" for F30-F39)
 
     Returns:
         List of dicts matching the target schema.
@@ -234,13 +248,13 @@ def build_patient_sequences(
     adm_clean = clean_admissions(admissions)
 
     print("\n[2/5] Building per-admission ICD codes..")
-    adm_dx = build_admission_icd_codes(diagnoses, depression_prefixes, psych_prefix)
+    adm_dx = build_admission_icd_codes(diagnoses, label_prefix)
 
     print("\n[3/5] Building per-admission active medications...")
     adm_meds = build_admission_active_meds(prescriptions, adm_clean)
 
     print("\n[4/5] Building encounters & applying cohort filters...")
-    # adm_clean (subject_id, hadm_id, times) + dx + meds
+    # (subject_id, hadm_id, times) + dx + meds
     encounters = (
         adm_clean
         .merge(adm_dx, on="hadm_id", how="left")
@@ -252,26 +266,32 @@ def build_patient_sequences(
         lambda x: x if isinstance(x, list) else [])
     encounters["meds"] = encounters["meds"].apply(
         lambda x: x if isinstance(x, list) else [])
-    encounters["has_depression"] = encounters["has_depression"].fillna(False)
-    encounters["has_fcode"] = encounters["has_fcode"].fillna(False)
-    
+    encounters["has_label_dx"] = encounters["has_label_dx"].fillna(False)
+
     # Sort by patient and time
     encounters = encounters.sort_values(["subject_id", "admittime"]).reset_index(drop=True)
     print(f"  Total encounters: {len(encounters):,}")
-
-    # filter > patients with at least one F32/F33 admission
-    depression_patients = set(encounters.loc[encounters["has_depression"], "subject_id"])
-    print(f"  Patients with F32/F33: {len(depression_patients):,}")
-    encounters = encounters[encounters["subject_id"].isin(depression_patients)]
 
     # filter > minimum encounters per patient
     enc_per_patient = encounters.groupby("subject_id").size()
     qualifying = set(enc_per_patient[enc_per_patient >= min_encounters].index)
     print(f"  Patients with >= {min_encounters} encounters: {len(qualifying):,}")
+    encounters = encounters[encounters["subject_id"].isin(qualifying)]
 
-    encounters = encounters[encounters["subject_id"].isin(qualifying)].copy()
-    print(f"  Final: {len(encounters):,} encounters, "
-          f"{encounters['subject_id'].nunique():,} patients")
+    # filter > readmission-based cohort: patients >= 1 readmission pair 
+    # where next admittime <= prior dischtime + window
+    readm_patients = set()
+    for subject_id, group in encounters.groupby("subject_id"):
+        rows = group.sort_values("admittime").to_dict("records")
+        for i in range(len(rows) - 1):
+            window_end = rows[i]["dischtime"] + timedelta(days=readm_window_days)
+            if rows[i + 1]["admittime"] <= window_end:
+                readm_patients.add(subject_id)
+                break
+    print(f"  Patients with readmission within {readm_window_days}d: {len(readm_patients):,}")
+
+    encounters = encounters[encounters["subject_id"].isin(readm_patients)].copy()
+    print(f"  Final: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
 
     # --- Compute labels and assemble sequences ---
     print(f"\n[5/5] Computing {readm_window_days}-day readmission labels...")
@@ -292,13 +312,13 @@ def build_patient_sequences(
                 "meds": row["meds"],
             })
 
-            # Check for x-day psych readmission after this discharge
+            # Check for readmission w/mood-disorder dx within window
             if patient_label == 0 and i < n - 1:
                 window_end = row["dischtime"] + timedelta(days=readm_window_days)
                 for j in range(i + 1, n):
                     if rows[j]["admittime"] > window_end:
                         break
-                    if rows[j]["has_fcode"]:
+                    if rows[j]["has_label_dx"]:
                         patient_label = 1
                         break
 
@@ -314,9 +334,9 @@ def build_patient_sequences(
     enc_counts = [len(s["encounters"]) for s in sequences]
 
     print(f"\n{'=' * 60}")
-    print(f"Pipeline complete!")
+    print(f"Sequences Summary: {readm_window_days}-day readmission")
     print(f"  Patients:        {len(sequences):,}")
-    print(f"  Label=1 (readm): {n_pos:,} ({100 * n_pos / len(sequences):.1f}%)")
+    print(f"  Label=1 (mood):  {n_pos:,} ({100 * n_pos / len(sequences):.1f}%)")
     print(f"  Label=0:         {n_neg:,} ({100 * n_neg / len(sequences):.1f}%)")
     print(f"  Encounters/pt:   mean={np.mean(enc_counts):.1f}, "
           f"median={np.median(enc_counts):.0f}, "

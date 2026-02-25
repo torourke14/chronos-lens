@@ -60,9 +60,9 @@ def flatten_sequences(sequences: list[dict]) -> tuple[pd.DataFrame, pd.Series]:
             "n_encounters": n_enc,
             "n_unique_icd": len(unique_icd),
             "n_unique_meds": len(unique_meds),
-            "n_fcode_encounters": n_fcode_enc,
-            "fcode_ratio": n_fcode_enc / n_enc,
-            "n_unique_fcodes": len(all_fcodes),
+            # "n_fcode_encounters": n_fcode_enc,
+            # "fcode_ratio": n_fcode_enc / n_enc,
+            # "n_unique_fcodes": len(all_fcodes),
             "mean_meds_per_enc": len(all_meds) / n_enc,
             "mean_icd_per_enc": len(all_icd) / n_enc,
             "span_days": span_days,
@@ -70,8 +70,8 @@ def flatten_sequences(sequences: list[dict]) -> tuple[pd.DataFrame, pd.Series]:
         }
 
         # ICD chapter presence flags
-        for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-            rec[f"icd_ch_{ch}"] = int(ch in icd_chapters)
+        # for ch in "ABCDEGHIJKLMNOPQRSTUVWXYZ":
+        #     rec[f"icd_ch_{ch}"] = int(ch in icd_chapters)
 
         records.append(rec)
 
