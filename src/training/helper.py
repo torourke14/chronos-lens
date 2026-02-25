@@ -1,5 +1,6 @@
-import torch
-from torch.amp import GradScaler # type: ignore
+
+
+
 
 
 def build_vocab(patients: list[dict], pad_idx: int) -> dict[str, int]:
@@ -18,42 +19,6 @@ def build_vocab(patients: list[dict], pad_idx: int) -> dict[str, int]:
         
     print(f"   len: {len(vocab)}")
     return vocab
-
-
-def init_optimizers(
-    model,
-    ipe: int,
-    num_epochs: int,
-    opt_params={},
-    use_bfloat16=False
-):
-    base_lr = float(opt_params.get("base_lr", 0.0))
-    optimizer = torch.optim.Adam(model.parameters(), lr=base_lr)
-    
-    sched_type = opt_params.get("schedule", "")
-    if sched_type == "warmup_cosine_annealing":
-        from src.training.schedulers import WarmupCosineAnnealing
-        scheduler = WarmupCosineAnnealing(
-            optimizer,
-            warmup_steps=ipe*opt_params.get("warmup_epochs", 0),
-            total_steps=ipe*num_epochs,
-            min_lr=base_lr)
-    elif sched_type == "linear_decay":
-        total_steps = ipe*num_epochs
-        min_lr_ratio = opt_params.get("min_lr_ratio", 0.0)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer,
-            lr_lambda=lambda step: max(min_lr_ratio, 
-                                       1.0 - (1.0 - min_lr_ratio) * step / total_steps))
-    elif sched_type == "static":
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
-    elif sched_type == "" or sched_type is None:
-        scheduler = None
-    else:
-        raise ValueError(f"[init_optimizers] Unknown scheduler '{sched_type}'. Expected 'warmup_cosine_annealing', 'linear_decay', 'linear', or 'static'")
-    
-    scaler = GradScaler('cuda') if use_bfloat16 else None
-    return optimizer, scheduler, scaler
 
 
 class CSVLogger(object):

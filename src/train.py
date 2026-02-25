@@ -4,7 +4,7 @@
 from os import environ
 from typing import Dict
 
-from .training.helper import init_optimizers
+from src.training.optimizers import init_optimizers
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 """
@@ -32,11 +32,11 @@ import matplotlib.pyplot as plt
 
 from src.models.sequential_jepa import JEPA
 from src.training.dataset import JEPADataset, collate_fn
+from src.training.helper import build_vocab
 from src.utils.io import (
     MODEL_RUNS_BASE_DIR, 
     PROCESSED_DIR, 
     load_sequences)
-
 
 
 
@@ -48,24 +48,6 @@ random.seed(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# =============================================================================
-# Vocab
-# =============================================================================
-
-def build_vocab(patients: list[dict], pad_idx: int) -> dict[str, int]:
-    """Map every unique ICD code and med name to a positive integer index.
-    Index 0 is reserved for [PAD].
-    """
-    tokens: set[str] = set()
-    for p in patients:
-        for enc in p.get("encounters", []):
-            tokens.update(enc.get("icd_codes", []))
-            tokens.update(enc.get("meds", []))
-    vocab: dict[str, int] = {"[PAD]": pad_idx}
-    for i, tok in enumerate(sorted(tokens), start=1):
-        vocab[tok] = i
-    return vocab
-
 
 
 def main(device: torch.device, params: Dict) -> None:
@@ -74,8 +56,8 @@ def main(device: torch.device, params: Dict) -> None:
     # --- data settings
     data_p = params['data']
     batch_size = data_p.get('batch_size', 0)
-    n_patients = data_p.get('n_patients', 0)
-    pad_idx = data_p.get('pad_idx', -1)
+    n_patients = data_p.get('n_patients', -1)
+    pad_idx = data_p.get('pad_idx', 0)
     use_bfloat16 = data_p.get('use_bfloat16', False)
     # --- model hypers
     model_p = params['model']
@@ -96,15 +78,18 @@ def main(device: torch.device, params: Dict) -> None:
     checkpoint_every = artifact_p.get('checkpoint_every', epochs)
     log_emb_vecs = artifact_p.get('log_emb_vecs', True)
     log_emb_vecs_every = artifact_p.get('log_emb_vecs_every', epochs)
-    
+        
     # --- path resolution ---
     artifact_folder = MODEL_RUNS_BASE_DIR / model_tag
     artifact_folder.mkdir(parents=True, exist_ok=True)
 
     # --- init PATIENT SEQUENCES, VOCAB ---
     patients = load_sequences(PROCESSED_DIR / "sequences.jsonl")
-    patients = patients[: n_patients]
-
+    if 0 <= n_patients > len(patients):
+        patients = patients[: n_patients]
+    else:
+        raise ValueError(f"n_patients outside [0, {len(patients)}] (for all patients, use n_patients=0)")
+    
     vocab = build_vocab(patients, pad_idx)
     vocab_out_path = artifact_folder / "vocab.json"
     with open(vocab_out_path, "w", encoding="utf-8") as fh:
@@ -181,6 +166,11 @@ def main(device: torch.device, params: Dict) -> None:
         log_emb_vecs_fn = lambda m, ep: eev_fn(
             model=m, loader=loader, device=device,
             out_fn=artifact_folder / f"embeddings_ep{ep}.npz")
+    
+    # Disabling tf32 matmul when using bfloat16 avoids stacking two levels of reduced precision
+    if device.type == "cuda" and use_bfloat16:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.benchmark = True
 
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
