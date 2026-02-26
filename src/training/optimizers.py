@@ -87,17 +87,16 @@ class WarmupCosineAnnealing:
 
 
 def init_optimizers(
-    model,
+    model, opt_params,
     ipe: int,
     num_epochs: int,
-    opt_params={},
     use_bfloat16=False
 ):
     base_lr = float(opt_params.get("base_lr", 0.0))
     optimizer = torch.optim.Adam(model.parameters(), lr=base_lr)
     
     sched_type = opt_params.get("schedule", "")
-    if sched_type == "warmup_cosine_annealing":
+    if sched_type == "warmup_cosine":
         scheduler = WarmupCosineAnnealing(
             optimizer,
             warmup_steps=ipe*opt_params.get("warmup_epochs", 0),
@@ -119,7 +118,8 @@ def init_optimizers(
         scheduler = None
         
     else:
-        raise ValueError(f"[init_optimizers] Unknown scheduler '{sched_type}'. Expected 'warmup_cosine_annealing', 'linear_decay', 'linear', or 'static'")
+        raise ValueError(f"[init_optimizers] scheduler '{sched_type}' not one of 'warmup_cosine_annealing', 'linear_decay', 'linear', or 'static'")
     
     scaler = GradScaler('cuda') if use_bfloat16 else None
+    
     return optimizer, scheduler, scaler

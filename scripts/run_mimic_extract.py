@@ -6,7 +6,7 @@ import argparse
 from src.mimic.mimic import build_patient_sequences, load_tables
 from src.mimic.helper import save_dataset, validate_sequences
 from src.mimic.baseline import run_baseline
-from src.utils.io import resolve_path, PROCESSED_DIR
+from src.utils.io import PROCESSED_DIR
 
 
 BQ_PROJECT_ID = "aihc-463505"

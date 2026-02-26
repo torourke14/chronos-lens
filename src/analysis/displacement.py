@@ -1,33 +1,31 @@
-
+import argparse
 from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from scipy import stats
+
 from src.models.sequential_jepa import JEPA
+from ..utils.io import load_checkpoint
 
 
 
 rng = np.random.default_rng(42)
 
 
-
 @torch.no_grad()
-def calc_embedding_vecs(
-    model: JEPA,
-    loader: DataLoader,
-    device: torch.device,
-) -> tuple:
+def calc_embedding_vecs(model: JEPA, loader: DataLoader, device: torch.device) -> tuple:
     """ Calculate context, predicted, and target embeddings for all masked tokens in the dataset.
         Returns:
-            z_context: (N, D) array of context embeddings
-            z_pred:    (N, D) array of predicted embeddings
-            z_target:  (N, D) array of target embeddings
-            delta:     (N, D) array of displacement vectors (pred - ctx)
-            subject_ids: (N,) array of subject IDs
-            mask_positions: (N,) array of masked positions in sequence
-            labels: (N,) array of true tokens at masked positions
+            z_context:      (N, D) context embeddings
+            z_pred:         (N, D) predicted embeddings
+            z_target:       (N, D) target embeddings
+            delta:          (N, D) displacement vectors (pred - ctx)
+            subject_ids:    (N,) arr of subject IDs
+            mask_positions: (N,) arr of masked positions in sequence
+            labels:         (N,) arr of true tokens at masked positions
     """
     model.eval()
     all_z_ctx:  list[np.ndarray] = []
@@ -51,90 +49,98 @@ def calc_embedding_vecs(
         all_mpos.append(batch["mask_pos"].numpy())
         all_labels.append(batch["labels"].numpy())
 
-    z_context     = np.concatenate(all_z_ctx,  axis=0)
-    z_pred_arr    = np.concatenate(all_z_pred, axis=0)
-    z_target      = np.concatenate(all_z_tgt,  axis=0)
-    delta         = z_pred_arr - z_context
-    subject_ids   = np.array(all_sids)
+    z_context   = np.concatenate(all_z_ctx,  axis=0)
+    z_pred_arr  = np.concatenate(all_z_pred, axis=0)
+    z_target    = np.concatenate(all_z_tgt,  axis=0)
+    z_pc_delta  = z_pred_arr - z_context
+    subject_ids = np.array(all_sids)
     mask_positions = np.concatenate(all_mpos,  axis=0)
-    labels        = np.concatenate(all_labels, axis=0)
+    labels      = np.concatenate(all_labels, axis=0)
 
-    return z_context, z_pred_arr, z_target, delta, subject_ids, mask_positions, labels
+    return z_context, z_pred_arr, z_target, z_pc_delta, subject_ids, mask_positions, labels
 
 
-def run_disp_field_checks(
-    z_context: np.ndarray,
-    z_pred:    np.ndarray,
-    z_target:  np.ndarray,
-    delta:     np.ndarray,
-    frac_nontrivial_thresh: float = 0.5
-) -> bool:
+def run_embedding_stat_check(
+    z_context:  np.ndarray,
+    z_pred:     np.ndarray,
+    z_target:   np.ndarray,
+    z_pc_delta: np.ndarray,
+    labels:     np.ndarray = None,
+    frac_nontrivial_thresh: float = 0.5,
+) -> dict:
     """ Run useful checks on extracted embeddings to ensure
         predictor hasn't collapsed, delta remains statistically significant, etc
     """
-    checks: Dict[str, tuple[bool, Any]] = {}
+    stat_log: Dict[str, Any] = {}
 
-    # Check z_pred has non-trivial variance (std > 0.01 per dimension)
+    # The variance of a significant portion of z_pred's dimensions
+    # should remain non-trivial (> 0.01) over time to avoid overfitting
     pred_std        = z_pred.std(axis=0)
     frac_nontrivial = float((pred_std > 0.01).mean())
-    z_pred_ok = frac_nontrivial > frac_nontrivial_thresh
+    stat_log['z_pred_ok'] = frac_nontrivial > frac_nontrivial_thresh
+    stat_log['z_pred_min_std'] = pred_std.min()
+    stat_log['z_pred_frac_nt_dims'] = frac_nontrivial
     
-    checks['nontrivial_variance'] = (z_pred_ok, (
-        f"z_pred min_std={pred_std.min():.4f}, "
-        f"z_pred frac_dims(>0.01)={frac_nontrivial:.1%}"
-    ))
-
-    # Check displacement field ||Delta|| hasn't collapsed
-    delta_norms = np.linalg.norm(delta, axis=-1)
-    delt_norm_ok = delta_norms.std() > 1e-4
-    checks['delta_norms'] = (delt_norm_ok, (
-        f"mean={delta_norms.mean():.4f}, "
-        f"std={delta_norms.std():.4f}, "
-        f"min={delta_norms.min():.4f}, "
-        f"max={delta_norms.max():.4f}"
-    ))
-
+    # Check displacement field ||Delta|| hasn't collapsed by ensuring
+    # its full variance hasn't collapsed
+    delta_norms = np.linalg.norm(z_pc_delta, axis=-1)
+    if labels is not None:
+        norms0 = delta_norms[labels == 0]
+        norms1 = delta_norms[labels == 1]
+        
+        if len(norms0) >= 1 and len(norms1) >= 1:
+            mw_stat, mw_p = stats.mannwhitneyu(norms0, norms1, alternative="two-sided")
+            mw_stat, mw_p = float(mw_stat), float(mw_p)
+        else:
+            mw_stat, mw_p = np.nan, np.nan
+        stat_log["mannwhitney_stat"] = mw_stat
+        stat_log["mannwhitney_p"] = mw_p
+    
+    stat_log["zpc_delta_ok"] = delta_norms.std() > 1e-4
+    stat_log["zpc_delta_norm_min"] = delta_norms.min()
+    stat_log["zpc_delta_norm_max"] = delta_norms.max()
+    stat_log["zpc_delta_norm_std"] = delta_norms.std()
+    stat_log["zpc_delta_norm_mean"] = delta_norms.mean()
+    
     # Check the predictor beats a random baseline scaled to z_target's distribution
     rand_pred = rng.standard_normal(z_pred.shape).astype(np.float32) * z_target.std() + z_target.mean()
     pred_dist = float(np.linalg.norm(z_pred    - z_target, axis=-1).mean())
-    rand_dist = float(np.linalg.norm(rand_pred - z_target, axis=-1).mean()) 
-    checks['predictor_v_random'] = (pred_dist < rand_dist, (
-        f"||z_pred-z_tgt||={pred_dist:.4f} vs "
-        f"||rand-z_tgt||={rand_dist:.4f}"
-    ))
+    rand_dist = float(np.linalg.norm(rand_pred - z_target, axis=-1).mean())
+    stat_log["pred_ok"] = pred_dist < rand_dist
+    stat_log["||z_pred-z_tgt||"] = pred_dist
+    stat_log["||rand-z_tgt||"] = rand_dist
 
-    for k, (ok, msg) in checks.items():
-        if not ok:
-            print(f"="*10 + "EMBEDDING STATE FAILURE" + "="*10)
-            for k, (ok, msg) in checks.items():
-                print(f"{k:20s} : {'PASS' if ok else 'FAIL'}  ({msg})")
-            return False
-    return True
-
-
-def extract_embedding_vecs(
+    return stat_log
+    
+    
+def save_embedding_vecs(
     model: JEPA,
     loader: DataLoader,
     device: torch.device,
-    out_fn: Path
+    out_fn: Path,
+    log = False
 ):
     """ Fetch context, predicted, and target embeddings for all masked tokens,
         and save to a .npz file for later analysis.
     """
     model.eval()
 
-    z_context, z_pred, z_target, delta, subject_ids, mask_positions, labels = \
+    z_context, z_pred, z_target, z_pc_delta, subject_ids, mask_positions, labels = \
         calc_embedding_vecs(model, loader, device)
 
     # don't save if predictor collapsed
-    all_passed = run_disp_field_checks(z_context, z_pred, z_target, delta)
-    if not all_passed:
+    stat_log = run_embedding_stat_check(z_context, z_pred, z_target, z_pc_delta, labels=labels)
+    if not all([stat_log['z_pred_ok'], stat_log['zpc_delta_ok'], stat_log["pred_ok"]]):
         print("Embeddings NOT saved: one or more sanity checks failed.")
-        return
+        return out_fn, stat_log
 
     np.savez(out_fn,
-             z_context = z_context, z_pred = z_pred, z_target = z_target,
-             delta = delta,
+             z_context = z_context, 
+             z_pred = z_pred, 
+             z_target = z_target,
+             delta = z_pc_delta,
              subject_ids = subject_ids,
              mask_positions = mask_positions,
-             labels = labels,)
+             labels = labels)
+    
+    return out_fn, stat_log

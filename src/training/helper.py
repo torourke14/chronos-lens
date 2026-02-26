@@ -1,11 +1,8 @@
 
 
 
-
-
 def build_vocab(patients: list[dict], pad_idx: int) -> dict[str, int]:
     """Map every unique ICD code and med name to a positive integer index.
-    Index 0 is reserved for [PAD].
     """
     print(f"[build_vocab] building vocab ([PAD]: {pad_idx})...")
     tokens: set[str] = set()

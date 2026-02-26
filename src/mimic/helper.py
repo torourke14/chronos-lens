@@ -72,19 +72,19 @@ def save_dataset(
         "vocab_size_meds": len(all_meds),
         "cohort_filters": {
             "cohort_definition": "readmission within window (no diagnosis requirement)",
-            "label_definition": "F30-F39 mood disorder at readmission",
+            "label_definition": "code = F3x at readmission = 1, else = 0",
             "min_encounters": min_encounters,
             "readm_window_days": readm_window_days,
             "exclude_deceased_admissions": True,
         },
         "schema": {
             "subject_id": "str",
-            "label": "int (0=readmitted no mood dx, 1=readmitted with F30-F39)",
+            "label": "int",
             "encounters[].hadm_id": "int",
             "encounters[].admittime": "ISO datetime string",
             "encounters[].dischtime": "ISO datetime string",
-            "encounters[].icd_codes": "list[str] - F-codes truncated to 3 chars, non-F retain dot notation",
-            "encounters[].meds": "list[str] - lowercase drug names active at admission",
+            "encounters[].icd_codes": "list[str]",
+            "encounters[].meds": "list[str]",
         },
     }
 

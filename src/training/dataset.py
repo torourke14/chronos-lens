@@ -35,6 +35,7 @@ class JEPADataset(Dataset):
                     "subject_id": sid,
                     "label":      label,
                 })
+        assert len(self.samples) > 0, "[JEPADataset] No training samples produced"
 
     def __len__(self):
         return len(self.samples)
